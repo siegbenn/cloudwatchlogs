@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
 
 import boto3
 import time
@@ -69,7 +69,7 @@ class LogStream(CloudWatchObject):
   event_limit = 1000
 
   # Log file rotation size.
-  log_file_limit = 10485760
+  log_file_limit = 1048576
 
   def __init__(self, log_stream_dict, log_group):
     # Inherit instance variables from CloudWatchObject.
@@ -128,26 +128,29 @@ class LogStream(CloudWatchObject):
     # Update the polling timestamp.
     self.last_event_check_timestamp = check_timestamp
 
-    print("Found " + str(len(events)) + " LogEvents for LogStream " + self.name)
+    print('Found ' + str(len(events)) + ' LogEvents for LogStream ' + self.log_group.name + ' ' + self.name)
     return events
 
   def write_log_events(self, log_events):
     """Writes LogEvents to a log file. Rotates log files if they larger than log_file_limit.
     """
     # Create log file name.
-    file_name = self.name + '-0.log'
-
-    # Rotate log file if it's bigger than
-    log_file_size = os.path.getsize(file_name)
-    if log_file_size > self.log_file_limit:
-      print("Rotating " + file_name)
-      os.rename(file_name, file_name.split(".")[0] + '-' + str(int(time.now)) + ".log")
+    # Replace / with - so LogGroup names can be written to current directory.
+    file_name = self.log_group.name.replace('/', '-') + "-" + self.name + '-0.log'
 
     # Append LogEvents to log file.
-    with open(self.name + '-0.log', 'a') as log_file:
+    with open(file_name, 'a') as log_file:
       for event in log_events:
         log_file.write(event.message + '\n')
-    print("Wrote " + str(len(log_events)) + " LogEvents to "+ file_name)
+    print('Wrote ' + str(len(log_events)) + ' LogEvents to ' + file_name)
+
+    # Rotate log file if it's bigger than limit
+    log_file_size = os.path.getsize(file_name)
+
+    if log_file_size > self.log_file_limit:
+      rotated_file_name = file_name.split('.')[0] + '-' + str(int(time.time())) + ".log"
+      print('Rotating ' + file_name + ' to ' + rotated_file_name)
+      os.rename(file_name, rotated_file_name)
 
   def get_and_append_log_events(self):
     """Gets all events since the last time they were polled.
@@ -182,6 +185,8 @@ class CloudWatchLogsMonitor:
     self.log_groups = LogGroup.get_log_groups()
 
   def run(self):
+    print('Starting CloudWatchLogsMonitor.')
+
     # Initialize pool for multithreading.
     pool = Pool()
 
@@ -189,6 +194,8 @@ class CloudWatchLogsMonitor:
       for log_group in self.log_groups:
         # For every log group get and append log events to log file.
         # This is run in parallel and is non-blocking.
+        # for log_stream in log_group.log_streams:
+        #   print(log_stream.get_and_append_log_events())
         pool.map_async(LogStream.get_and_append_log_events, log_group.log_streams)
 
       # Sleep for the polling interval.
