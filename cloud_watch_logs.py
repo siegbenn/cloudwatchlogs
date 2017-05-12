@@ -3,8 +3,7 @@
 import boto3
 import time
 import os
-from multiprocessing import Pool
-from collections import namedtuple
+from multiprocessing.pool import ThreadPool
 
 __author__ = 'bennett.e.siegel@gmail.com'
 
@@ -19,14 +18,37 @@ class CloudWatchObject:
         # Amazon Resource Name (ARN). Uniquely identifies AWS resources.
         self.arn = cloud_watch_dict['arn']
 
+    # Compare ARN to determine equality.
+    # This is a unique AWS signature.
+    # Used to update LogGroups and LogStreams
     def __eq__(self, other):
         return self.arn == other.arn
 
+    # Hash ARN.
     def __hash__(self):
         return hash(self.arn)
 
+    # ARN as object string.
     def __repr__(self):
         return '%r' % self.arn
+
+    @staticmethod
+    def update_cloud_watch_obj_list(old_list, new_list):
+        """Updates list of objects. Adds that exist in the new_list.
+           Removes objects that only exist in the old_list.
+        """
+
+        # Add new LogStreams.
+        for new_item in new_list:
+            if new_item not in old_list:
+                old_list.append(new_item)
+
+        # Remove deleted LogStreams.
+        for old_item in old_list:
+            if old_item not in new_list:
+                old_list.remove(old_item)
+
+        return old_list
 
 
 class LogGroup(CloudWatchObject):
@@ -56,16 +78,14 @@ class LogGroup(CloudWatchObject):
 
     @staticmethod
     def update_log_groups(log_groups):
+        """Adds new LogGroups and removes deleted LogGroups to a list of LogGroups.
+        """
+
+        # Get new list of LogGroups.
         new_groups = LogGroup.get_log_groups()
-        for new_group in new_groups:
-            if new_group not in log_groups:
-                log_groups.append(new_group)
 
-        for log_group in log_groups:
-            if log_group not in new_groups:
-                log_groups.remove(log_group)
-
-        return log_groups
+        # Update LogGroup list.
+        return CloudWatchObject.update_cloud_watch_obj_list(log_groups, new_groups)
 
 
 class LogStream(CloudWatchObject):
@@ -111,22 +131,22 @@ class LogStream(CloudWatchObject):
 
     @staticmethod
     def update_log_streams(log_streams, log_group):
+        """Adds new LogStreams and removes deleted LogStreams to a list of LogStreams.
+        """
+
+        # Get new list of LogStreams.
         new_streams = LogStream.get_log_streams(log_group)
-        for new_stream in new_streams:
-            if new_stream not in log_streams:
-                log_streams.append(new_stream)
 
-        for log_stream in log_streams:
-            if log_stream not in new_streams:
-                log_streams.remove(log_stream)
-
-        return log_streams
+        # Update LogStream list.
+        return CloudWatchObject.update_cloud_watch_obj_list(log_streams, new_streams)
 
     @staticmethod
     def get_timestamp():
         """Converts the current time into a millisecond timestamp.
         """
-        return int(time.time()) * 1000
+
+        # Convert timestamp to int after multiply by 1000 to get millisecond timestamp in int.
+        return int(time.time() * 1000)
 
     def get_log_events(self):
         """Gets all events since the last time they were polled.
@@ -134,17 +154,18 @@ class LogStream(CloudWatchObject):
         client = boto3.client('logs')
 
         # Set the timestamp we will start from next poll.
-        check_timestamp = self.get_timestamp()
+        # and limit current poll to.
+        end_timestamp = self.get_timestamp()
 
         # Request LogEvents.
         log_events_response = client.get_log_events(
+            startTime=self.last_event_check_timestamp,
+            endTime=end_timestamp,
             logGroupName=self.log_group.name,
             logStreamName=self.name,
             limit=self.event_limit,
-            startTime=self.last_event_check_timestamp,
+            startFromHead=True
         )
-
-        print(max(log_events_response))
 
         # Create LogEvents list from response.
         events = [LogEvent(log_event_dict) for log_event_dict in log_events_response['events']]
@@ -152,19 +173,29 @@ class LogStream(CloudWatchObject):
         # Token used if another request is required to get all LogEvents.
         next_forward_token = log_events_response['nextForwardToken']
 
-        # While we get LogEvents equal to event_limit, continue requesting.
         event_count = len(events)
-        while event_count == self.event_limit:
+
+        # While we get LogEvents equal to event_limit, continue requesting.
+        while event_count >= self.event_limit:
             log_events_response = client.get_log_events(
-                nextToken=next_forward_token
+                startTime=self.last_event_check_timestamp,
+                endTime=end_timestamp,
+                logGroupName=self.log_group.name,
+                logStreamName=self.name,
+                limit=self.event_limit,
+                nextToken=next_forward_token,
+                startFromHead=True
             )
+
+            # Set length and next forward token for while loop.
             event_count = len(log_events_response['events'])
+            next_forward_token = log_events_response['nextForwardToken']
 
             # Add LogEvents to our event list.
-            events.append([LogEvent(log_event_dict) for log_event_dict in log_events_response['events']])
+            events += [LogEvent(log_event_dict) for log_event_dict in log_events_response['events']]
 
-        # Update the polling timestamp.
-        self.last_event_check_timestamp = check_timestamp
+        # Set starting point for next poll
+        self.last_event_check_timestamp = end_timestamp
 
         print('Found ' + str(len(events)) + ' LogEvents for LogStream ' + self.log_group.name + ' ' + self.name)
         return events
@@ -193,8 +224,10 @@ class LogStream(CloudWatchObject):
     def get_and_append_log_events(self):
         """Gets all events since the last time they were polled.
         """
+
         log_events = self.get_log_events()
 
+        # Write log events to file.
         if len(log_events) > 0:
             self.write_log_events(log_events)
 
@@ -211,10 +244,6 @@ class LogEvent:
         # When the LogEvent was ingested
         self.ingestion_time = log_event_dict['ingestionTime']
 
-    def __gt__(self, other):
-        return self.timestamp > other.timestamp
-
-
 
 class CloudWatchLogsMonitor:
     """The default number of seconds between polling for new CloudWatch Log events.
@@ -229,29 +258,37 @@ class CloudWatchLogsMonitor:
         self.log_groups = LogGroup.get_log_groups()
 
     def update(self):
+        """Updates the list of LogGroups and their LogStreams.
+        """
         print('Updating LogGroups and LogStreams')
         log_groups = LogGroup.update_log_groups(self.log_groups)
         for log_group in log_groups:
-                log_group.log_streams = LogStream.update_log_streams(log_group.log_streams, log_group)
+            log_group.log_streams = LogStream.update_log_streams(log_group.log_streams, log_group)
         self.log_groups = log_groups
 
     def run(self):
+        """Starts CloudWatch Logs collection.
+        """
         print('Starting CloudWatchLogsMonitor.')
 
         # Initialize pool for multithreading.
-        pool = Pool()
+        # Use ThreadPool for shared memory (used for keeping track of last polled timestamp)
+        pool = ThreadPool()
 
         while True:
 
+            # Check for new LogGroups and LogStreams.
             self.update()
 
             for log_group in self.log_groups:
                 # For every log group get and append log events to log file.
                 # This is run in parallel and is non-blocking.
+
+                # Uncomment to run synchronously
                 # for log_stream in log_group.log_streams:
                 #     LogStream.get_and_append_log_events(log_stream)
+
                 pool.map_async(LogStream.get_and_append_log_events, log_group.log_streams)
 
             # Sleep for the polling interval.
             time.sleep(self.default_polling_interval)
-
