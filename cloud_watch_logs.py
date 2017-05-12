@@ -261,8 +261,16 @@ class CloudWatchLogsMonitor:
         """Updates the list of LogGroups and their LogStreams.
         """
         print('Updating LogGroups and LogStreams')
+
+        # Add new LogGroups. Remove old LogGroups.
         log_groups = LogGroup.update_log_groups(self.log_groups)
+
+        # Ideally, LogStreams should only be updated for maintained (not new) LogGroups.
+        # This is because LogStreams are initialized at LogGroup object creation.
+        # LogGroups don't get added very often so, there isn't much of a performance hit.
+        # TODO: Only update LogStreams for maintained LogGroups.
         for log_group in log_groups:
+            # Add new LogStreams. Remove old LogStreams.
             log_group.log_streams = LogStream.update_log_streams(log_group.log_streams, log_group)
         self.log_groups = log_groups
 
@@ -283,12 +291,12 @@ class CloudWatchLogsMonitor:
             for log_group in self.log_groups:
                 # For every log group get and append log events to log file.
                 # This is run in parallel and is non-blocking.
+                pool.map_async(LogStream.get_and_append_log_events, log_group.log_streams)
 
-                # Uncomment to run synchronously
+                # These lines run the agent synchronously.
+                # You need to comment out the pool.map_async line above if using synchronous loop.
                 # for log_stream in log_group.log_streams:
                 #     LogStream.get_and_append_log_events(log_stream)
-
-                pool.map_async(LogStream.get_and_append_log_events, log_group.log_streams)
 
             # Sleep for the polling interval.
             time.sleep(self.default_polling_interval)
