@@ -17,6 +17,8 @@ class CloudWatchObject:
         self.creation_time = cloud_watch_dict['creationTime']
         # Amazon Resource Name (ARN). Uniquely identifies AWS resources.
         self.arn = cloud_watch_dict['arn']
+        # Used to determine if the object has been added since the agent started. This way won't miss LogEvents
+        # or update LogStreams for a new LogGroup initially.
         self.added = False
 
     # Compare ARN to determine equality.
