@@ -17,6 +17,7 @@ class CloudWatchObject:
         self.creation_time = cloud_watch_dict['creationTime']
         # Amazon Resource Name (ARN). Uniquely identifies AWS resources.
         self.arn = cloud_watch_dict['arn']
+        self.added = False
 
     # Compare ARN to determine equality.
     # This is a unique AWS signature.
@@ -38,12 +39,13 @@ class CloudWatchObject:
            Removes objects that only exist in the old_list.
         """
 
-        # Add new LogStreams.
+        # Add new.
         for new_item in new_list:
             if new_item not in old_list:
+                new_item.added = True
                 old_list.append(new_item)
 
-        # Remove deleted LogStreams.
+        # Remove deleted.
         for old_item in old_list:
             if old_item not in new_list:
                 old_list.remove(old_item)
@@ -158,6 +160,13 @@ class LogStream(CloudWatchObject):
         end_timestamp = self.get_timestamp()
 
         # Request LogEvents.
+
+        # Check if LogStream was added while agent was running. If so, get LogEvents from LogStream creation time.
+        # So we don't miss any.
+        if self.added:
+            self.last_event_check_timestamp = self.creation_time
+            self.added = False
+
         log_events_response = client.get_log_events(
             startTime=self.last_event_check_timestamp,
             endTime=end_timestamp,
@@ -267,11 +276,14 @@ class CloudWatchLogsMonitor:
 
         # Ideally, LogStreams should only be updated for maintained (not new) LogGroups.
         # This is because LogStreams are initialized at LogGroup object creation.
-        # LogGroups don't get added very often so, there isn't much of a performance hit.
-        # TODO: Only update LogStreams for maintained LogGroups.
         for log_group in log_groups:
-            # Add new LogStreams. Remove old LogStreams.
-            log_group.log_streams = LogStream.update_log_streams(log_group.log_streams, log_group)
+            if not log_group.added:
+                # Add new LogStreams. Remove old LogStreams.
+                log_group.log_streams = LogStream.update_log_streams(log_group.log_streams, log_group)
+            else:
+                # Set added to false to we update LogStreams next time.
+                log_group.added = False
+
         self.log_groups = log_groups
 
     def run(self):
